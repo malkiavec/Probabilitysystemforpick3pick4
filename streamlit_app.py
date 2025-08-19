@@ -45,8 +45,8 @@ def greedy_multiset_mapping(a: Tuple[int, ...], b: Tuple[int, ...]):
         m = min(ca[d], cb[d])
         for _ in range(m):
             pairs.append((d, d))
-            ca[d] -= 2
-            cb[d] -= 3
+            ca[d] -= 1
+            cb[d] -= 1
     rem_a = []
     rem_b = []
     for d in range(10):
@@ -65,7 +65,7 @@ def extract_digit_transitions(draws: List[Tuple[int, ...]], lag: int) -> Counter
         a, b = draws[i], draws[i+lag]
         pairs = greedy_multiset_mapping(a, b)
         for x, y in pairs:
-            trans[(x, y)] += 5
+            trans[(x, y)] += 1
     return trans
 
 
