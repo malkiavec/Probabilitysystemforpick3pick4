@@ -422,7 +422,145 @@ if draws:
 
     preds = [tuple_to_str(c) for c, _ in scored[:num_preds]]
     st.write(preds)
+def is_match(pred: Tuple[int,...], actual: Tuple[int,...], positionless: bool) -> bool:
+    if positionless:
+        return Counter(pred) == Counter(actual)
+    return pred == actual
 
+def generate_predictions_for_seed(
+    seed: Tuple[int, ...],
+    cnt: Counter,
+    alpha: float,
+    top_k: int,
+    mapping_flag: str,
+    num_preds: int,
+) -> List[Tuple[int, ...]]:
+    probs = normalize_matrix(cnt, alpha=alpha)
+    candidates = apply_positionless_transitions(seed, probs, top_k)
+    scored = [
+        (cand, score_by_transition_likelihood(cand, seed, probs, mapping=mapping_flag))
+        for cand in candidates
+    ]
+    scored.sort(key=lambda t: t[1], reverse=True)
+    return [c for c, _ in scored[:num_preds]]
+
+@st.cache_data(show_spinner=False)
+def backtest(
+    draws: List[Tuple[int, ...]],
+    recent_window: int,
+    max_lag: int,
+    lag_weights: List[float],
+    alpha: float,
+    top_k: int,
+    mapping_flag: str,
+    num_preds: int,
+    positionless_match: bool = False,
+    start_min_history: int = 30,  # wait for at least this many draws before testing
+) -> pd.DataFrame:
+    """
+    Walk-forward evaluation:
+    At time t, train on draws[:t], predict for draws[t], record hit.
+    """
+    rows = []
+    for t in range(start_min_history, len(draws)):
+        history = draws[max(0, t - recent_window):t] if recent_window > 0 else draws[:t]
+        if len(history) < 2:
+            continue
+        # Build weighted transitions from history
+        all_trans = Counter()
+        for lag, w in zip(range(1, max_lag + 1), lag_weights):
+            if w <= 0:
+                continue
+            trans = extract_digit_transitions(history, lag, mapping=mapping_flag)
+            if w != 1.0:
+                trans = Counter({k: v * w for k, v in trans.items()})
+            all_trans.update(trans)
+
+        seed = history[-1]
+        preds = generate_predictions_for_seed(
+            seed=seed,
+            cnt=all_trans,
+            alpha=alpha,
+            top_k=top_k,
+            mapping_flag=mapping_flag,
+            num_preds=num_preds,
+        )
+        actual = draws[t]
+        hit = any(is_match(p, actual, positionless_match) for p in preds)
+        rows.append(
+            {
+                "t": t,
+                "seed": tuple_to_str(seed),
+                "actual": tuple_to_str(actual),
+                "hit": int(hit),
+                "preds": [tuple_to_str(p) for p in preds],
+            }
+        )
+    return pd.DataFrame(rows)
+st.subheader("Backtest (walk-forward)")
+col_bt1, col_bt2, col_bt3 = st.columns(3)
+with col_bt1:
+    positionless_bt = st.checkbox("Positionless match", value=False)
+with col_bt2:
+    min_hist = st.number_input("Min history to start", min_value=10, max_value=500, value=50, step=10)
+with col_bt3:
+    run_bt = st.button("Run backtest")
+
+if run_bt and draws and len(draws) > min_hist:
+    bt_df = backtest(
+        draws=draws,
+        recent_window=recent_window,
+        max_lag=max_lag,
+        lag_weights=lag_weights,
+        alpha=alpha,
+        top_k=per_digit_topk,
+        mapping_flag=mapping_flag,
+        num_preds=num_preds,
+        positionless_match=positionless_bt,
+        start_min_history=int(min_hist),
+    )
+    if bt_df.empty:
+        st.info("Not enough data to backtest with current settings.")
+    else:
+        total = len(bt_df)
+        hits = int(bt_df["hit"].sum())
+        hit_rate = hits / total if total else 0.0
+        st.metric("Backtest hit rate", f"{hit_rate:.1%}", help=f"{hits}/{total} hits")
+
+        # Rolling hit rate
+        bt_df["rolling_hit"] = bt_df["hit"].rolling(20, min_periods=1).mean()
+        st.line_chart(bt_df.set_index("t")[["rolling_hit"]])
+
+        # Show last few rows with predictions
+        st.dataframe(bt_df.tail(20))
+        # Download
+        st.download_button(
+            "Download backtest results",
+            bt_df.to_csv(index=False).encode("utf-8"),
+            "backtest.csv",
+            mime="text/csv",
+        )
+# After generating preds for last_draw:
+st.session_state.setdefault("last_seed", None)
+st.session_state.setdefault("last_preds", [])
+
+if st.session_state["last_seed"] != tuple_to_str(last_draw):
+    st.session_state["last_seed"] = tuple_to_str(last_draw)
+    st.session_state["last_preds"] = preds  # store strings
+
+# If the uploaded history includes new draws beyond last_seed, check hit:
+if len(draws) >= 2:
+    prev_seed_str = st.session_state.get("last_seed")
+    # Identify the first draw after prev_seed in the uploaded series
+    try:
+        idx = [tuple_to_str(d) for d in draws].index(prev_seed_str)
+        if idx + 1 < len(draws):
+            actual_today = tuple_to_str(draws[idx + 1])
+            hit_live = actual_today in st.session_state.get("last_preds", [])
+            st.write(f"Live check for next draw after {prev_seed_str}: actual={actual_today}, hit={hit_live}")
+    except ValueError:
+        pass
+        
     # Download
     csv_bytes = pd.Series(preds, name="prediction").to_csv(index=False).encode("utf-8")
     st.download_button("Download Predictions", csv_bytes, "predictions.csv", mime="text/csv")
