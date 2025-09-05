@@ -348,9 +348,4 @@ mapping_flag = "optimal" if mapping_mode.startswith("Optimal") else "greedy"
 
 alpha = st.sidebar.slider("Smoothing α (Laplace=1.0)", 0.0, 2.0, 0.5, 0.1)
 
-play_mode = st.sidebar.radio("Prediction set size", ["10 picks", "20 picks", "30 picks", "50 picks"])
-num_preds = int(play_mode.split()[0])
-
-if HAS_PLOTTING:
-    do_heat
-    
+play_mode = st.sidebar.radio("
