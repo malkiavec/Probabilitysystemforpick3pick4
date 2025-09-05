@@ -348,4 +348,107 @@ mapping_flag = "optimal" if mapping_mode.startswith("Optimal") else "greedy"
 
 alpha = st.sidebar.slider("Smoothing α (Laplace=1.0)", 0.0, 2.0, 0.5, 0.1)
 
-play_mode = st.sidebar.radio("
+play_mode = st.sidebar.radio("Prediction set size", ["10 picks", "20 picks", "30 picks", "50 picks"])
+num_preds = int(play_mode.split()[0])
+
+if HAS_PLOTTING:
+    do_heatmaps = st.sidebar.checkbox("Show heatmaps", value=True)
+else:
+    do_heatmaps = False
+
+# -----------------------------
+# Main Logic
+# -----------------------------
+draws: List[Tuple[int, ...]] = []
+
+if hist_file is not None:
+    try:
+        df = pd.read_csv(hist_file)
+        # Parse and validate
+        draws = parse_draws_from_df(df, n_digits=n_digits, hist_col=hist_col)
+    except Exception as e:
+        st.error(f"Failed to read CSV: {e}")
+
+if draws:
+    st.subheader("Data Summary")
+    st.write(f"Total parsed draws: {len(draws)}; Unique: {len(set(draws))}")
+    if len(draws) < 20:
+        st.warning("Very few draws detected; results may be unstable.")
+
+    st.subheader("Transition Analysis")
+    all_trans = compute_transitions(
+        draws=draws,
+        recent_window=recent_window,
+        max_lag=max_lag,
+        lag_weights=lag_weights,
+        mapping=mapping_flag,
+    )
+
+    df_mat = transition_matrix_to_df(all_trans)
+    st.markdown("Top outgoing transitions per digit (P(y|x))")
+
+    # Top-3 per source digit
+    top_rows = []
+    for x in range(10):
+        row = [(y, df_mat.iloc[x, y]) for y in range(10)]
+        row.sort(key=lambda t: t[1], reverse=True)
+        for y, p in row[:3]:
+            top_rows.append({"from": x, "to": y, "prob": round(float(p), 4)})
+    st.dataframe(pd.DataFrame(top_rows))
+
+    if do_heatmaps:
+        # Avoid slow plotting for very large windows
+        if len(draws) <= 10000:
+            fig, ax = plt.subplots(figsize=(6, 4))
+            sns.heatmap(df_mat, annot=False, cmap="Blues", cbar=True, ax=ax)
+            ax.set_title("Weighted Transition Heatmap (P(y|x))")
+            st.pyplot(fig)
+        else:
+            st.info("Heatmap skipped for large datasets.")
+
+    probs = normalize_matrix(all_trans, alpha=alpha)
+
+    st.subheader("Predictions")
+    last_draw = draws[-1]
+    st.write(f"Last draw: {tuple_to_str(last_draw)}")
+
+    candidates = apply_positionless_transitions(last_draw, probs, per_digit_topk)
+    # Score candidates
+    scored = [
+        (cand, score_by_transition_likelihood(cand, last_draw, probs, mapping=mapping_flag))
+        for cand in candidates
+    ]
+    scored.sort(key=lambda t: t[1], reverse=True)
+
+    preds = [tuple_to_str(c) for c, _ in scored[:num_preds]]
+    st.write(preds)
+
+    # Download
+    csv_bytes = pd.Series(preds, name="prediction").to_csv(index=False).encode("utf-8")
+    st.download_button("Download Predictions", csv_bytes, "predictions.csv", mime="text/csv")
+
+    # Debug/Explainability
+    with st.expander("Why these predictions?"):
+        # Show contribution for top-5
+        top5 = scored[: min(5, len(scored))]
+        expl_rows = []
+        for cand, sc in top5:
+            pairs = greedy_multiset_mapping(last_draw, cand) if mapping_flag == "greedy" else greedy_multiset_mapping(
+                last_draw, cand
+            )
+            parts = []
+            for x, y in pairs:
+                p = probs.get((x, y), 1e-12)
+                parts.append(f"{x}->{y} (p={p:.3f})")
+            expl_rows.append({"candidate": tuple_to_str(cand), "score": round(sc, 4), "pairs": ", ".join(parts)})
+        st.dataframe(pd.DataFrame(expl_rows))
+
+else:
+    st.info("Upload your history CSV to start analysis or enable sample data.")
+
+# -----------------------------
+# Notes
+# -----------------------------
+# - Positionless mapping is heuristic; 'Optimal' mode can slightly alter rankings.
+# - Smoothing alpha prevents zero-probability log penalties and stabilizes small samples.
+# - Lag weights emphasize certain skips; try exponential decay for more recency focus.
